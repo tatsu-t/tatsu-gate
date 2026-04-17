@@ -1,5 +1,6 @@
 plugins {
     id("java")
+    id("com.gradleup.shadow") version "8.3.6"
 }
 
 group = "dev.gate"
@@ -13,4 +14,13 @@ java {
 
 dependencies {
     implementation(project(":gate-core"))
+}
+
+tasks.shadowJar {
+    manifest {
+        attributes["Main-Class"] = "app.Main"
+    }
+    archiveBaseName.set("app")
+    archiveClassifier.set("")
+    archiveVersion.set("")
 }

@@ -18,9 +18,15 @@ public class Gate {
 
     private final Router router = new Router();
     private final AnnotationScanner scanner = new AnnotationScanner(router);
+    private String corsOrigin = null;
 
     public void register(Object controller) {
         scanner.scan(controller);
+    }
+
+    public Gate cors(String allowedOrigin) {
+        this.corsOrigin = allowedOrigin;
+        return this;
     }
 
     public void start(int port) throws Exception {
@@ -31,25 +37,43 @@ public class Gate {
             public void handle(String target, Request baseRequest,
                                HttpServletRequest request,
                                HttpServletResponse response) throws IOException {
-
-                String key = request.getMethod() + ":" + target;
-                Context ctx = new Context(target, request);
-
-                router.find(key).ifPresentOrElse(
-                    handler -> {
-                        handler.handle(ctx);
-                        response.setStatus(200);
-                    },
-                    () -> {
-                        response.setStatus(404);
-                        ctx.result("404 Not Found");
+                try {
+                    if (corsOrigin != null) {
+                        response.setHeader("Access-Control-Allow-Origin", corsOrigin);
+                        response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+                        response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
                     }
-                );
 
-                ctx.headers().forEach(response::addHeader);
-                response.setContentType(ctx.contentType());
-                response.getWriter().print(ctx.responseBody());
-                baseRequest.setHandled(true);
+                    if ("OPTIONS".equals(request.getMethod())) {
+                        response.setStatus(204);
+                        baseRequest.setHandled(true);
+                        return;
+                    }
+
+                    String key = request.getMethod() + ":" + target;
+                    Context ctx = new Context(target, request);
+
+                    router.find(key).ifPresentOrElse(
+                        handler -> {
+                            handler.handle(ctx);
+                            response.setStatus(200);
+                        },
+                        () -> {
+                            response.setStatus(404);
+                            ctx.result("404 Not Found");
+                        }
+                    );
+
+                    ctx.headers().forEach(response::addHeader);
+                    response.setContentType(ctx.contentType());
+                    response.getWriter().print(ctx.responseBody());
+                    response.getWriter().flush();
+                } catch (Exception e) {
+                    System.err.println("[Gate] handle error: " + e.getMessage());
+                    response.setStatus(500);
+                } finally {
+                    baseRequest.setHandled(true);
+                }
             }
         });
 
