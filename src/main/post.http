@@ -1,4 +1,0 @@
-POST http://localhost:8080/echo
-Content-Type: text/plain
-
-Hello Gate!
