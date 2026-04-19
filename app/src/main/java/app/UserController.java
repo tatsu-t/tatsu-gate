@@ -27,14 +27,9 @@ public class UserController {
         ctx.json(users);
     }
 
-    @GetMapping("/user")
+    @GetMapping("/users/{id}")
     public void getUser(Context ctx) {
-        String idParam = ctx.query("id");
-        if (idParam == null) {
-            ctx.status(400);
-            ctx.json(Map.of("error", "id is required"));
-            return;
-        }
+        String idParam = ctx.pathParam("id");
 
         int id;
         try {

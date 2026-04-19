@@ -19,6 +19,7 @@ public class Context {
     private String contentType = "text/plain; charset=utf-8";
     private int statusCode = 200;
     private final Map<String, String> headers = new HashMap<>();
+    private Map<String, String> pathParams = Map.of();
     private String cachedBody = null;
 
     public Context(String path, HttpServletRequest request) {
@@ -27,6 +28,10 @@ public class Context {
     }
 
     public String path() { return path; }
+
+    public String pathParam(String name) { return pathParams.get(name); }
+
+    void setPathParams(Map<String, String> params) { this.pathParams = params; }
 
     public String query(String key) { return request.getParameter(key); }
 

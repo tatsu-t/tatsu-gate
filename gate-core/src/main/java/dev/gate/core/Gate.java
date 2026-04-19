@@ -96,7 +96,10 @@ public class Gate {
                     String key = request.getMethod() + ":" + path;
 
                     router.find(key).ifPresentOrElse(
-                        handler -> handler.handle(ctx),
+                        match -> {
+                            ctx.setPathParams(match.pathParams());
+                            match.handler().handle(ctx);
+                        },
                         () -> {
                             ctx.status(404);
                             ctx.result("404 Not Found");
