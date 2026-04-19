@@ -16,6 +16,11 @@ public class Tester {
     @GetMapping("/hello")
     public void hello(Context ctx) {
         String name = ctx.query("name");
+        if (name == null || name.isBlank()) {
+            ctx.status(400);
+            ctx.result("name parameter is required");
+            return;
+        }
         ctx.result("Hello, " + name + "!");
     }
 
@@ -42,5 +47,10 @@ public class Tester {
     @WsMapping("/chat")
     public void chat(WsContext ctx, String message) {
         ctx.send("Echo: " + message);
+    }
+
+    @GetMapping("/error")
+    public void error(Context ctx) {
+        throw new RuntimeException("test error");
     }
 }

@@ -1,13 +1,14 @@
 package dev.gate.core;
 
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class Router {
 
-    private final Map<String, Handler> routes = new HashMap<>();
-    private final Map<String, WsHandle> wsRoutes = new HashMap<>();
+    private final Map<String, Handler> routes = new ConcurrentHashMap<>();
+    private final Map<String, WsHandle> wsRoutes = new ConcurrentHashMap<>();
 
     public void register(String key, Handler handler) {
         routes.put(key, handler);
@@ -25,6 +26,6 @@ public class Router {
         return Optional.ofNullable(wsRoutes.get(path));
     }
     public Map<String, WsHandle> getWsRoutes() {
-        return wsRoutes;
+        return Collections.unmodifiableMap(wsRoutes);
     }
 }

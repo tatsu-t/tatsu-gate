@@ -8,7 +8,10 @@ public class Config {
 
     //読み込み
     public int getPort() { return port; }
-    public void setPort(int port) { this.port = port; }
+    public void setPort(int port) {
+        if (port < 1 || port > 65535) throw new IllegalArgumentException("Invalid port: " + port);
+        this.port = port;
+    }
     public String getEnv() { return env; }
     public void setEnv(String env) { this.env = env; }
     public String getName() { return name; }

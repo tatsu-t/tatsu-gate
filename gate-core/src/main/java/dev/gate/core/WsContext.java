@@ -5,6 +5,8 @@ import java.io.IOException;
 
 public class WsContext {
 
+    private static final Logger logger = new Logger(WsContext.class);
+
     private final Session session;
 
     public WsContext(Session session) {
@@ -15,7 +17,7 @@ public class WsContext {
         try {
             session.getRemote().sendString(message);
         } catch (IOException e) {
-            e.printStackTrace();
+            logger.error("Failed to send WebSocket message: " + e.getMessage(), e);
         }
     }
 

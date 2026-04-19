@@ -22,4 +22,6 @@ dependencies {
     implementation("org.eclipse.jetty.websocket:websocket-jetty-server:11.0.20")
     implementation("org.eclipse.jetty.websocket:websocket-jetty-api:11.0.20")
     implementation("org.eclipse.jetty.websocket:websocket-servlet:11.0.20")
+    implementation("org.slf4j:slf4j-api:2.0.9")
+    implementation("ch.qos.logback:logback-classic:1.4.11")
 }

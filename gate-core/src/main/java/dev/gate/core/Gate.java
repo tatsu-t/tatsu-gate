@@ -12,8 +12,12 @@ import org.eclipse.jetty.websocket.server.config.JettyWebSocketServletContainerI
 
 import java.io.File;
 import java.io.IOException;
-import java.net.URL;
+import java.io.PrintWriter;
 import java.net.JarURLConnection;
+import java.net.URL;
+import java.nio.file.Paths;
+import java.util.Enumeration;
+import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
 public class Gate {
@@ -21,13 +25,35 @@ public class Gate {
     private final Router router = new Router();
     private final AnnotationScanner scanner = new AnnotationScanner(router);
     private String corsOrigin = null;
+    private final Logger logger = new Logger(Gate.class);
+
+    private ErrorHandler errorHandler = (ctx, e) -> {
+        logger.error("Unhandled error: " + e.getMessage(), e);
+        ctx.status(500);
+        ctx.result("500 Internal Server Error");
+    };
 
     public void register(Object controller) {
         scanner.scan(controller);
     }
 
     public Gate cors(String allowedOrigin) {
+        if ("*".equals(allowedOrigin)) {
+            logger.warn("CORS configured with wildcard '*' — credentials cannot be used with this origin");
+        }
         this.corsOrigin = allowedOrigin;
+        return this;
+    }
+
+    public Gate errorHandler(ErrorHandler handler) {
+        this.errorHandler = handler;
+        return this;
+    }
+
+    private int wsMaxMessageSize = 64 * 1024;
+
+    public Gate wsMaxMessageSize(int bytes) {
+        this.wsMaxMessageSize = bytes;
         return this;
     }
 
@@ -36,7 +62,9 @@ public class Gate {
         ServletContextHandler context = new ServletContextHandler();
         context.setContextPath("/");
 
+        final int finalWsMaxSize = this.wsMaxMessageSize;
         JettyWebSocketServletContainerInitializer.configure(context, (servletContext, wsContainer) -> {
+            wsContainer.setMaxTextMessageSize(finalWsMaxSize);
             router.getWsRoutes().forEach((path, wsHandler) -> {
                 wsContainer.addMapping(path, (req, res) -> new WsAdapter(wsHandler));
             });
@@ -46,6 +74,13 @@ public class Gate {
         context.addServlet(new ServletHolder(new HttpServlet() {
             @Override
             protected void service(HttpServletRequest request, HttpServletResponse response) throws IOException {
+                String path = request.getPathInfo();
+                if (path == null || path.isEmpty()) path = request.getServletPath();
+                if (path == null || path.isEmpty()) path = "/";
+                if (path.length() > 1 && path.endsWith("/")) path = path.substring(0, path.length() - 1);
+
+                Context ctx = new Context(path, request);
+
                 try {
                     if (finalCorsOrigin != null) {
                         response.setHeader("Access-Control-Allow-Origin", finalCorsOrigin);
@@ -58,61 +93,68 @@ public class Gate {
                         return;
                     }
 
-                    String path = request.getPathInfo();
-                    if (path == null) path = request.getServletPath();
                     String key = request.getMethod() + ":" + path;
-                    Context ctx = new Context(path, request);
 
                     router.find(key).ifPresentOrElse(
-                        handler -> {
-                            handler.handle(ctx);
-                            response.setStatus(200);
-                        },
+                        handler -> handler.handle(ctx),
                         () -> {
-                            response.setStatus(404);
+                            ctx.status(404);
                             ctx.result("404 Not Found");
                         }
                     );
-
-                    ctx.headers().forEach(response::addHeader);
-                    response.setContentType(ctx.contentType());
-                    response.getWriter().print(ctx.responseBody());
-                    response.getWriter().flush();
                 } catch (Exception e) {
-                    System.err.println("[Gate] handle error: " + e.getMessage());
-                    response.setStatus(500);
+                    errorHandler.handle(ctx, e);
                 }
+
+                // ヘッダー・ContentType は Writer 取得前に設定する
+                response.setStatus(ctx.statusCode());
+                ctx.headers().forEach(response::setHeader);
+                response.setContentType(ctx.contentType());
+
+                PrintWriter writer = response.getWriter();
+                writer.print(ctx.responseBody());
+                writer.flush();
             }
         }), "/*");
 
         server.setHandler(context);
 
-        System.out.println("starting on port " + port);
-        server.start();
-        server.join();
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            logger.info("Shutting down server...");
+            try { server.stop(); } catch (Exception ex) { logger.error("Error stopping server", ex); }
+        }));
+
+        logger.info("Starting on port " + port);
+        try {
+            server.start();
+            server.join();
+        } catch (Exception e) {
+            server.stop();
+            throw e;
+        }
     }
 
     public void scan(String packageName) throws Exception {
         String packagePath = packageName.replace('.', '/');
         ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
 
-        var resources = classLoader.getResources(packagePath);
+        Enumeration<URL> resources = classLoader.getResources(packagePath);
         if (!resources.hasMoreElements()) {
-            System.err.println("notfound: " + packageName);
+            logger.warn("Package not found: " + packageName);
             return;
         }
 
         while (resources.hasMoreElements()) {
             URL url = resources.nextElement();
             switch (url.getProtocol()) {
-                case "file" -> scanDirectory(packageName, classLoader, new File(url.getFile()));
+                case "file" -> scanDirectory(packageName, classLoader, Paths.get(url.toURI()).toFile());
                 case "jar"  -> scanJar(packageName, classLoader, url);
-                default     -> System.err.println("unsupported: " + url.getProtocol());
+                default     -> logger.warn("Unsupported protocol: " + url.getProtocol());
             }
         }
     }
 
-        private void scanDirectory(String packageName, ClassLoader classLoader, File directory) throws Exception {
+    private void scanDirectory(String packageName, ClassLoader classLoader, File directory) throws Exception {
         if (!directory.isDirectory()) return;
 
         File[] files = directory.listFiles();
@@ -128,29 +170,32 @@ public class Gate {
         }
     }
 
-        private void scanJar(String packageName, ClassLoader classLoader, URL url) throws Exception {
+    private void scanJar(String packageName, ClassLoader classLoader, URL url) throws Exception {
         JarURLConnection conn = (JarURLConnection) url.openConnection();
+        conn.setUseCaches(false);
         String packagePath = packageName.replace('.', '/') + "/";
 
         try (JarFile jar = conn.getJarFile()) {
-            jar.stream()
-                .filter(e -> e.getName().startsWith(packagePath) && e.getName().endsWith(".class"))
-                .forEach(e -> {
-                    String className = e.getName().replace('/', '.').replace(".class", "");
+            Enumeration<JarEntry> entries = jar.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = entries.nextElement();
+                if (entry.getName().startsWith(packagePath) && entry.getName().endsWith(".class")) {
+                    String className = entry.getName().replace('/', '.').replace(".class", "");
                     loadAndRegister(className, classLoader);
-                });
+                }
+            }
         }
     }
 
-        private void loadAndRegister(String className, ClassLoader classLoader) {
+    private void loadAndRegister(String className, ClassLoader classLoader) {
         try {
             Class<?> clazz = classLoader.loadClass(className);
             if (clazz.isAnnotationPresent(GateController.class)) {
                 register(clazz.getDeclaredConstructor().newInstance());
-                System.out.println("load:" + className);
+                logger.info("Loaded controller: " + className);
             }
         } catch (Exception e) {
-            System.err.println("failed: " + className + " - " + e.getMessage());
+            logger.error("Failed to load class: " + className + " - " + e.getMessage(), e);
         }
     }
 }

@@ -5,19 +5,22 @@ import dev.gate.core.Context;
 import dev.gate.mapping.GetMapping;
 import dev.gate.mapping.PostMapping;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @GateController
 public class UserController {
 
     record User(int id, String name, String email) {}
 
-    private final List<User> users = new ArrayList<>(List.of(
+    private final CopyOnWriteArrayList<User> users = new CopyOnWriteArrayList<>(List.of(
         new User(1, "Alice", "alice@example.com"),
         new User(2, "Bob",   "bob@example.com")
     ));
+
+    private final AtomicInteger idGenerator = new AtomicInteger(2);
 
     @GetMapping("/users")
     public void getUsers(Context ctx) {
@@ -28,26 +31,50 @@ public class UserController {
     public void getUser(Context ctx) {
         String idParam = ctx.query("id");
         if (idParam == null) {
+            ctx.status(400);
             ctx.json(Map.of("error", "id is required"));
             return;
         }
 
-        int id = Integer.parseInt(idParam);
+        int id;
+        try {
+            id = Integer.parseInt(idParam);
+        } catch (NumberFormatException e) {
+            ctx.status(400);
+            ctx.json(Map.of("error", "id must be a number"));
+            return;
+        }
+
         users.stream()
             .filter(u -> u.id() == id)
             .findFirst()
             .ifPresentOrElse(
                 ctx::json,
-                () -> ctx.json(Map.of("error", "user not found"))
+                () -> {
+                    ctx.status(404);
+                    ctx.json(Map.of("error", "user not found"));
+                }
             );
     }
 
     @PostMapping("/users")
     public void createUser(Context ctx) {
-        String body = ctx.body();
-        int newId = users.size() + 1;
-        User user = new User(newId, "User" + newId, "user" + newId + "@example.com");
-        users.add(user);
-        ctx.json(user);
+        try {
+            CreateUserRequest req = ctx.bodyAs(CreateUserRequest.class);
+            if (req == null || req.name() == null || req.email() == null) {
+                ctx.status(400);
+                ctx.json(Map.of("error", "name and email are required"));
+                return;
+            }
+            User user = new User(idGenerator.incrementAndGet(), req.name(), req.email());
+            users.add(user);
+            ctx.status(201);
+            ctx.json(user);
+        } catch (Exception e) {
+            ctx.status(400);
+            ctx.json(Map.of("error", "Invalid request body"));
+        }
     }
+
+    record CreateUserRequest(String name, String email) {}
 }

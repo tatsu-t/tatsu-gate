@@ -1,15 +1,18 @@
 package dev.gate.annotation;
 
+import dev.gate.core.Logger;
 import dev.gate.core.Router;
 import dev.gate.core.Context;
 import dev.gate.mapping.GetMapping;
 import dev.gate.mapping.PostMapping;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import dev.gate.mapping.WsMapping;
 
 public class AnnotationScanner {
 
+    private static final Logger logger = new Logger(AnnotationScanner.class);
     private final Router router;
 
     public AnnotationScanner(Router router) {
@@ -20,6 +23,7 @@ public class AnnotationScanner {
         Class<?> clazz = controller.getClass();
 
         for (Method method : clazz.getDeclaredMethods()) {
+            if (!Modifier.isPublic(method.getModifiers())) continue;
             if (method.isAnnotationPresent(GetMapping.class)) {
                 String path = method.getAnnotation(GetMapping.class).value();
                 router.register("GET:" + path, ctx -> invoke(method, controller, ctx));
@@ -35,7 +39,7 @@ public class AnnotationScanner {
                     try {
                         method.invoke(controller, ctx, message);
                     } catch (Exception e) {
-                        e.printStackTrace();
+                        logger.error("WS handler error in " + method.getName() + ": " + e.getMessage(), e);
                     }
                 });
             }
@@ -46,12 +50,11 @@ public class AnnotationScanner {
         try {
             method.invoke(controller, ctx);
         } catch (InvocationTargetException e) {
-            Throwable cause = e.getCause();
-            System.err.println("server error: " + method.getName() + " - " + cause.getMessage());
-            ctx.result("500 Internal Server Error");
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof RuntimeException re) throw re;
+            throw new RuntimeException(cause);
         } catch (IllegalAccessException e) {
-            System.err.println("accessfailed: " + method.getName() + " - " + e.getMessage());
-            ctx.result("500 Internal Server Error");
+            throw new RuntimeException("Cannot access handler: " + method.getName(), e);
         }
     }
 }
