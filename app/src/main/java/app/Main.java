@@ -14,7 +14,7 @@ public class Main {
         logger.info("Starting {} in {} mode", config.getName(), config.getEnv());
 
         Gate gate = new Gate();
-        gate.scan("app");
+        gate.register(new UserController());
         GateServer server = gate.start(config.getPort());
         server.join();
     }

@@ -1,0 +1,286 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1776767735243,
+  "projectRoot": "C:\\Users\\tatsu\\Desktop\\scripts\\tatsu-gate",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "app"
+    ],
+    "gitBranches": {
+      "defaultBranch": "master",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "app": {
+      "path": "app",
+      "purpose": "Application code",
+      "fileCount": 1,
+      "lastAccessed": 1776767735222,
+      "keyFiles": [
+        "build.gradle.kts"
+      ]
+    },
+    "build": {
+      "path": "build",
+      "purpose": "Build output",
+      "fileCount": 0,
+      "lastAccessed": 1776767735222,
+      "keyFiles": []
+    },
+    "gate-core": {
+      "path": "gate-core",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1776767735222,
+      "keyFiles": [
+        "build.gradle.kts"
+      ]
+    },
+    "gate-mapping": {
+      "path": "gate-mapping",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1776767735222,
+      "keyFiles": [
+        "build.gradle.kts"
+      ]
+    },
+    "gradle": {
+      "path": "gradle",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1776767735223,
+      "keyFiles": []
+    },
+    "app\\build": {
+      "path": "app\\build",
+      "purpose": "Build output",
+      "fileCount": 0,
+      "lastAccessed": 1776767735223,
+      "keyFiles": []
+    },
+    "app\\src": {
+      "path": "app\\src",
+      "purpose": "Source code",
+      "fileCount": 0,
+      "lastAccessed": 1776767735223,
+      "keyFiles": []
+    },
+    "gate-core\\build": {
+      "path": "gate-core\\build",
+      "purpose": "Build output",
+      "fileCount": 0,
+      "lastAccessed": 1776767735224,
+      "keyFiles": []
+    },
+    "gate-core\\src": {
+      "path": "gate-core\\src",
+      "purpose": "Source code",
+      "fileCount": 0,
+      "lastAccessed": 1776767735224,
+      "keyFiles": []
+    },
+    "gate-mapping\\build": {
+      "path": "gate-mapping\\build",
+      "purpose": "Build output",
+      "fileCount": 0,
+      "lastAccessed": 1776767735225,
+      "keyFiles": []
+    },
+    "gate-mapping\\src": {
+      "path": "gate-mapping\\src",
+      "purpose": "Source code",
+      "fileCount": 0,
+      "lastAccessed": 1776767735225,
+      "keyFiles": []
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\Gate.java",
+      "accessCount": 5,
+      "lastAccessed": 1776784963536,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\Router.java",
+      "accessCount": 4,
+      "lastAccessed": 1776784966748,
+      "type": "file"
+    },
+    {
+      "path": "app\\src\\main\\java\\app\\UserController.java",
+      "accessCount": 3,
+      "lastAccessed": 1776784945538,
+      "type": "file"
+    },
+    {
+      "path": "app\\src\\main\\java\\app\\Main.java",
+      "accessCount": 3,
+      "lastAccessed": 1776784951310,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 2,
+      "lastAccessed": 1776784822212,
+      "type": "directory"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\Context.java",
+      "accessCount": 2,
+      "lastAccessed": 1776784826542,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\annotation\\AnnotationScanner.java",
+      "accessCount": 2,
+      "lastAccessed": 1776784826901,
+      "type": "file"
+    },
+    {
+      "path": "Dockerfile",
+      "accessCount": 2,
+      "lastAccessed": 1776784856543,
+      "type": "file"
+    },
+    {
+      "path": ".claude\\settings.local.json",
+      "accessCount": 1,
+      "lastAccessed": 1776768055385,
+      "type": "file"
+    },
+    {
+      "path": ".claude\\settings.json",
+      "accessCount": 1,
+      "lastAccessed": 1776768158344,
+      "type": "file"
+    },
+    {
+      "path": "settings.gradle.kts",
+      "accessCount": 1,
+      "lastAccessed": 1776777779330,
+      "type": "file"
+    },
+    {
+      "path": "docker-compose.yml",
+      "accessCount": 1,
+      "lastAccessed": 1776777786726,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\resources\\config.yml",
+      "accessCount": 1,
+      "lastAccessed": 1776777786992,
+      "type": "file"
+    },
+    {
+      "path": "gate-mapping\\src\\main\\java\\dev\\gate\\mapping\\GetMapping.java",
+      "accessCount": 1,
+      "lastAccessed": 1776777802691,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\annotation\\GateController.java",
+      "accessCount": 1,
+      "lastAccessed": 1776777802929,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\WsContext.java",
+      "accessCount": 1,
+      "lastAccessed": 1776777805847,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\Handler.java",
+      "accessCount": 1,
+      "lastAccessed": 1776777806260,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\ConfigLoader.java",
+      "accessCount": 1,
+      "lastAccessed": 1776777806379,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\Config.java",
+      "accessCount": 1,
+      "lastAccessed": 1776777815447,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\Logger.java",
+      "accessCount": 1,
+      "lastAccessed": 1776777815900,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\WsAdapter.java",
+      "accessCount": 1,
+      "lastAccessed": 1776777819677,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\ErrorHandler.java",
+      "accessCount": 1,
+      "lastAccessed": 1776777819939,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\WsHandler.java",
+      "accessCount": 1,
+      "lastAccessed": 1776777823731,
+      "type": "file"
+    },
+    {
+      "path": "gate-core\\src\\main\\java\\dev\\gate\\core\\GateServer.java",
+      "accessCount": 1,
+      "lastAccessed": 1776777824585,
+      "type": "file"
+    },
+    {
+      "path": "app\\src\\main\\resources\\META-INF\\native-image\\dev.gate\\app\\reflect-config.json",
+      "accessCount": 1,
+      "lastAccessed": 1776785034278,
+      "type": "file"
+    },
+    {
+      "path": "app\\src\\main\\resources\\META-INF\\native-image\\dev.gate\\app\\resource-config.json",
+      "accessCount": 1,
+      "lastAccessed": 1776785035083,
+      "type": "file"
+    },
+    {
+      "path": "Dockerfile.native",
+      "accessCount": 1,
+      "lastAccessed": 1776785039366,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

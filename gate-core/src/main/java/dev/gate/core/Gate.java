@@ -34,6 +34,7 @@ public class Gate {
     private final List<Handler> afterFilters = new CopyOnWriteArrayList<>();
     private String corsOrigin = null;
     private int wsMaxMessageSize = 64 * 1024;
+    private int idleTimeoutMs = 30_000;
 
     private ErrorHandler errorHandler = (ctx, e) -> {
         logger.error("Unhandled error: " + e.getMessage(), e);
@@ -98,6 +99,11 @@ public class Gate {
         return this;
     }
 
+    public Gate timeout(int ms) {
+        this.idleTimeoutMs = ms;
+        return this;
+    }
+
     public Gate errorHandler(ErrorHandler handler) {
         this.errorHandler = handler;
         return this;
@@ -112,6 +118,7 @@ public class Gate {
         Server server = new Server(threadPool);
         ServerConnector connector = new ServerConnector(server);
         connector.setPort(port);
+        connector.setIdleTimeout(idleTimeoutMs);
         server.addConnector(connector);
 
         ServletContextHandler context = new ServletContextHandler();

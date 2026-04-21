@@ -1,5 +1,7 @@
 package dev.gate.core;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -125,11 +127,13 @@ public class Router {
             }
 
             if (match) {
-                // マッチ確認後にパラメータを抽出
+                // マッチ確認後にパラメータを抽出（URLデコード済み）
                 Map<String, String> params = new HashMap<>();
                 for (int i = 0; i < route.segments().length; i++) {
                     if (route.segments()[i] == null) {
-                        params.put(route.paramNames()[i], requestSegments[i]);
+                        String raw = requestSegments[i];
+                        String decoded = URLDecoder.decode(raw, StandardCharsets.UTF_8);
+                        params.put(route.paramNames()[i], decoded);
                     }
                 }
                 Map<String, String> immutableParams = Map.copyOf(params);
