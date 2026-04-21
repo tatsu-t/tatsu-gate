@@ -1,7 +1,0 @@
-{
-  "tool_name": "Read",
-  "tool_input_preview": "{\"file_path\":\"C:\\\\Users\\\\tatsu\\\\Desktop\\\\scripts\\\\tatsu-gate\\\\gate-mapping\\\\src\\\\main\\\\java\"}",
-  "error": "EISDIR: illegal operation on a directory, read 'C:\\Users\\tatsu\\Desktop\\scripts\\tatsu-gate\\gate-mapping\\src\\main\\java'",
-  "timestamp": "2026-04-21T13:23:17.253Z",
-  "retry_count": 3
-}
