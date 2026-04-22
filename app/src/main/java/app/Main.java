@@ -14,7 +14,7 @@ public class Main {
         Config config = ConfigLoader.load();
         logger.info("Starting {} in {} mode", config.getName(), config.getEnv());
 
-        Database.init(config.getDatabase());
+        Database.init();
 
         Gate gate = new Gate();
         gate.register(new UserController());
