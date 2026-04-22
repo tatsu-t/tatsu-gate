@@ -12,6 +12,12 @@ import java.util.Map;
 @GateController
 public class Tester {
 
+    @GetMapping("/hearth")
+    public void hearth(Context ctx) {
+        ctx.result("running...");
+        ctx.status(200);
+    }
+
     @GetMapping("/hello")
     public void hello(Context ctx) {
         String name = ctx.query("name");
@@ -49,4 +55,5 @@ public class Tester {
     public void error(Context ctx) {
         throw new RuntimeException("test error");
     }
+
 }
