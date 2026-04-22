@@ -35,6 +35,7 @@ public class Gate {
     private String corsOrigin = null;
     private int wsMaxMessageSize = 64 * 1024;
     private int idleTimeoutMs = 30_000;
+    private volatile boolean started = false;
 
     private ErrorHandler errorHandler = (ctx, e) -> {
         logger.error("Unhandled error: " + e.getMessage(), e);
@@ -95,6 +96,9 @@ public class Gate {
     }
 
     public Gate wsMaxMessageSize(int bytes) {
+        if (started) {
+            throw new IllegalStateException("wsMaxMessageSize() must be called before start()");
+        }
         this.wsMaxMessageSize = bytes;
         return this;
     }
@@ -112,6 +116,7 @@ public class Gate {
     // --- Server lifecycle ---
 
     public GateServer start(int port) throws Exception {
+        started = true;
         // Java 21 Virtual Threads via Jetty's official API
         QueuedThreadPool threadPool = new QueuedThreadPool();
         threadPool.setVirtualThreadsExecutor(Executors.newVirtualThreadPerTaskExecutor());

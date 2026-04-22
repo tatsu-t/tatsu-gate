@@ -7,7 +7,6 @@ A lightweight HTTP framework for Java 21, built on Jetty with virtual thread sup
 ## Table of Contents
 
 - [Requirements](#requirements)
-- [Modules](#modules)
 - [Quick Start](#quick-start)
 - [Routing](#routing)
 - [Context API](#context-api)
@@ -25,15 +24,6 @@ A lightweight HTTP framework for Java 21, built on Jetty with virtual thread sup
 
 - Java 21
 - Gradle 9.x
-
-## Modules
-
-| Module | Description |
-|---|---|
-| `gate-mapping` | HTTP verb annotations (`@GetMapping`, `@PostMapping`, etc.) |
-| `gate-core` | Framework core: routing, request/response, WebSocket, database |
-
-`gate-core` declares `api(project(":gate-mapping"))`, so any project depending on `gate-core` automatically gets the mapping annotations on its compile classpath.
 
 ## Quick Start
 

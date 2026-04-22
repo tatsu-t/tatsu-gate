@@ -7,7 +7,6 @@ Java 21 向け軽量 HTTP フレームワーク。Jetty をベースに仮想ス
 ## 目次
 
 - [要件](#要件)
-- [モジュール構成](#モジュール構成)
 - [クイックスタート](#クイックスタート)
 - [ルーティング](#ルーティング)
 - [Context API](#context-api)
@@ -25,15 +24,6 @@ Java 21 向け軽量 HTTP フレームワーク。Jetty をベースに仮想ス
 
 - Java 21
 - Gradle 9.x
-
-## モジュール構成
-
-| モジュール | 説明 |
-|---|---|
-| `gate-mapping` | HTTP メソッドアノテーション（`@GetMapping`、`@PostMapping` など） |
-| `gate-core` | フレームワーク本体：ルーティング、リクエスト/レスポンス、WebSocket、DB |
-
-`gate-core` は `gate-mapping` を `api` 依存として宣言しているため、`gate-core` に依存するプロジェクトにはアノテーションも自動的に含まれます。
 
 ## クイックスタート
 

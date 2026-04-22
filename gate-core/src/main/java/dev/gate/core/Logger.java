@@ -36,4 +36,12 @@ public class Logger {
     public void error(String format, Object... args) {
         logger.error(format, args);
     }
+
+    public void debug(String message) {
+        logger.debug(message);
+    }
+
+    public void debug(String format, Object... args) {
+        logger.debug(format, args);
+    }
 }

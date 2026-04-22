@@ -12,7 +12,6 @@ java {
 }
 
 dependencies {
-    api(project(":gate-mapping"))
     implementation("org.eclipse.jetty:jetty-server:11.0.20")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.17.0") {
         exclude(group = "net.bytebuddy")
