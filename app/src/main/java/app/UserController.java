@@ -1,6 +1,6 @@
 package app;
 
-import app.db.Database;
+import dev.gate.core.Database;
 import dev.gate.annotation.GateController;
 import dev.gate.core.Context;
 import dev.gate.mapping.DeleteMapping;

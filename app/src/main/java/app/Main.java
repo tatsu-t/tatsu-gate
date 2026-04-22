@@ -1,7 +1,7 @@
 package app;
 
-import app.db.Database;
 import dev.gate.core.Config;
+import dev.gate.core.Database;
 import dev.gate.core.ConfigLoader;
 import dev.gate.core.Gate;
 import dev.gate.core.GateServer;
@@ -14,7 +14,7 @@ public class Main {
         Config config = ConfigLoader.load();
         logger.info("Starting {} in {} mode", config.getName(), config.getEnv());
 
-        Database.init();
+        Database.init(config.getDatabase());
 
         Gate gate = new Gate();
         gate.register(new UserController());
