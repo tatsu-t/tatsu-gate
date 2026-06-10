@@ -1,8 +1,6 @@
 .gradle/
 build/
 !gradle/wrapper/gradle-wrapper.jar
-__pycache__/
-*.pyc
 
 ### IDE ###
 .idea/
@@ -14,16 +12,7 @@ out/
 
 ### Claude Code ###
 .claude/
-tools/
 
 ### OS ###
 .DS_Store
 .omc/
-
-### Secrets ###
-*-key.json
-deployer-key.json
-
-
-*graphify*
-SPEC.md

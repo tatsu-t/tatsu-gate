@@ -255,7 +255,7 @@ Access-Control-Max-Age: 86400
 
 `Access-Control-Allow-Credentials: true` is added only when the origin is not `"*"`.
 
-Preflight `OPTIONS` requests return `204` after before filters run. This allows IP-based filters (e.g. `CloudflareIpFilter`) to reject unauthorized origins before responding. Filters that require request credentials (e.g. `ApiKeyAuth`, `CfAccessAuth`) must skip OPTIONS internally, since browsers do not include credentials in preflights.
+Preflight `OPTIONS` requests return `204` immediately. Before filters do not run for OPTIONS requests.
 
 ## Error Handling
 
@@ -273,7 +273,7 @@ run via `finally`, but the response may be incomplete. Keep error handlers simpl
 
 ## Database
 
-Gate includes built-in MySQL support via HikariCP.
+Gate includes built-in PostgreSQL support via HikariCP.
 
 ```java
 // Initialize on startup (must be called before gate.start())
@@ -298,10 +298,10 @@ Use `IF NOT EXISTS` to keep it idempotent across restarts.
 
 ```sql
 CREATE TABLE IF NOT EXISTS users (
-    id         INT          PRIMARY KEY AUTO_INCREMENT,
+    id         SERIAL PRIMARY KEY,
     name       VARCHAR(255) NOT NULL,
     email      VARCHAR(255) NOT NULL UNIQUE,
-    created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 ```
 
@@ -330,9 +330,9 @@ env: development
 name: MyApp
 database:
   host: localhost
-  port: 3306
+  port: 5432
   name: mydb
-  user: root
+  user: postgres
   password: ""
   cloudSqlInstance: ""   # GCP Cloud SQL instance (project:region:instance)
   maxPoolSize: 10
