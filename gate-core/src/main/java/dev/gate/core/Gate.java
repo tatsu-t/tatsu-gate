@@ -10,11 +10,13 @@ import org.eclipse.jetty.server.ServerConnector;
 import org.eclipse.jetty.servlet.ServletContextHandler;
 import org.eclipse.jetty.servlet.ServletHolder;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
+import org.eclipse.jetty.websocket.server.JettyServerUpgradeRequest;
+import org.eclipse.jetty.websocket.server.JettyServerUpgradeResponse;
 import org.eclipse.jetty.websocket.server.config.JettyWebSocketServletContainerInitializer;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.PrintWriter;
+import java.io.OutputStream;
 import java.net.JarURLConnection;
 import java.net.URL;
 import java.nio.file.Paths;
@@ -32,7 +34,6 @@ public class Gate {
     private final Logger logger = new Logger(Gate.class);
     private final List<Handler> beforeFilters = new CopyOnWriteArrayList<>();
     private final List<Handler> afterFilters = new CopyOnWriteArrayList<>();
-    private String corsOrigin = null;
     private int wsMaxMessageSize = 64 * 1024;
     private int idleTimeoutMs = 30_000;
     private volatile boolean started = false;
@@ -87,14 +88,6 @@ public class Gate {
         scanner.scan(controller);
     }
 
-    public Gate cors(String allowedOrigin) {
-        if ("*".equals(allowedOrigin)) {
-            logger.warn("CORS configured with wildcard '*' — credentials cannot be used with this origin");
-        }
-        this.corsOrigin = allowedOrigin;
-        return this;
-    }
-
     public Gate wsMaxMessageSize(int bytes) {
         if (started) {
             throw new IllegalStateException("wsMaxMessageSize() must be called before start()");
@@ -117,9 +110,26 @@ public class Gate {
 
     public GateServer start(int port) throws Exception {
         started = true;
-        // Java 21 Virtual Threads via Jetty's official API
-        QueuedThreadPool threadPool = new QueuedThreadPool();
-        threadPool.setVirtualThreadsExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        installCancelledKeyExceptionSuppressor();
+
+        QueuedThreadPool threadPool = new QueuedThreadPool() {
+            @Override
+            protected void runJob(Runnable job) {
+                try {
+                    super.runJob(job);
+                } catch (java.nio.channels.CancelledKeyException ignored) {
+                    // Jetty selector key cancellation noise — harmless
+                }
+            }
+        };
+        // Virtual threads with a custom factory so their uncaught-exception handler
+        // also suppresses CancelledKeyException before it reaches GraalVM stderr.
+        java.util.concurrent.ThreadFactory vtFactory = Thread.ofVirtual()
+                .uncaughtExceptionHandler((t, e) -> {
+                    if (!isCancelledKeyException(e)) e.printStackTrace(System.err);
+                })
+                .factory();
+        threadPool.setVirtualThreadsExecutor(Executors.newThreadPerTaskExecutor(vtFactory));
         Server server = new Server(threadPool);
         ServerConnector connector = new ServerConnector(server);
         connector.setPort(port);
@@ -133,51 +143,55 @@ public class Gate {
         JettyWebSocketServletContainerInitializer.configure(context, (servletContext, wsContainer) -> {
             wsContainer.setMaxTextMessageSize(finalWsMaxSize);
             router.getWsRoutes().forEach((path, wsHandler) -> {
-                wsContainer.addMapping(path, (req, res) -> new WsAdapter(wsHandler));
+                // WS アップグレードはサーブレット service() を通らないため、
+                // creator 内で before-filter チェーンの認可を必ず通す。
+                wsContainer.addMapping(path, (req, res) ->
+                        authorizeWsUpgrade(req, res) ? new WsAdapter(wsHandler) : null);
             });
         });
 
-        final String finalCorsOrigin = this.corsOrigin;
         context.addServlet(new ServletHolder(new HttpServlet() {
             @Override
             protected void service(HttpServletRequest request, HttpServletResponse response) throws IOException {
-                String path = request.getPathInfo();
-                if (path == null || path.isEmpty()) path = request.getServletPath();
-                if (path == null || path.isEmpty()) path = "/";
-                if (path.length() > 1 && path.endsWith("/")) path = path.substring(0, path.length() - 1);
+                String path = resolvePath(request);
+
+                // Jetty の正規化に依存しない多層防御: デコード後のパスに ".." が残っている場合は拒否。
+                // 正規ルートは ".." を含まないため、誤検知は発生しない。
+                if (path.contains("..")) {
+                    response.sendError(HttpServletResponse.SC_BAD_REQUEST);
+                    return;
+                }
+
+                // ホットパスでは request.getMethod() を複数回参照するのでローカルで 1 回だけ取る。
+                // Jetty の HttpServletRequest実装では getMethod() はフィールド読みだが、
+                // ホットパスでは回数 = req の不必要なレピートを避ける。
+                final String httpMethod = request.getMethod();
 
                 Context ctx = new Context(path, request);
 
                 try {
-                    if (finalCorsOrigin != null) {
-                        response.setHeader("Access-Control-Allow-Origin", finalCorsOrigin);
-                        response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
-                        response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key");
-                        response.setHeader("Access-Control-Max-Age", "86400");
-                        if (!"*".equals(finalCorsOrigin)) {
-                            response.setHeader("Access-Control-Allow-Credentials", "true");
-                        }
-                    }
-
-                    if ("OPTIONS".equals(request.getMethod())) {
-                        response.setStatus(204);
-                        return;
-                    }
-
+                    // Run ALL before-filters first (CloudflareIpFilter, ApiKeyAuth, CfAccessAuth).
+                    // This ensures OPTIONS preflights are also subject to IP and auth checks.
+                    // Individual filters that require credentials (ApiKeyAuth, CfAccessAuth) must
+                    // skip OPTIONS themselves since browsers do not send credentials in preflights.
                     for (Handler filter : beforeFilters) {
                         filter.handle(ctx);
                         if (ctx.isHalted()) break;
                     }
 
                     if (!ctx.isHalted()) {
-                        String key = request.getMethod() + ':' + path;
-                        router.find(key).ifPresentOrElse(
-                            match -> {
-                                ctx.setPathParams(match.pathParams());
-                                match.handler().handle(ctx);
-                            },
-                            () -> ctx.status(404).result("404 Not Found")
-                        );
+                        if ("OPTIONS".equals(httpMethod)) {
+                            ctx.status(204);
+                        } else {
+                            String key = httpMethod + ':' + path;
+                            router.find(key).ifPresentOrElse(
+                                match -> {
+                                    ctx.setPathParams(match.pathParams());
+                                    match.handler().handle(ctx);
+                                },
+                                () -> ctx.status(404).result("404 Not Found")
+                            );
+                        }
                     }
                 } catch (Exception e) {
                     errorHandler.handle(ctx, e);
@@ -196,9 +210,13 @@ public class Gate {
                 ctx.headers().forEach(response::setHeader);
                 response.setContentType(ctx.contentType());
 
-                PrintWriter writer = response.getWriter();
-                writer.print(ctx.responseBody());
-                writer.flush();
+                // String→char[]→byte[]の二重変換を避けるため、UTF-8 byte[] を直接書き込む。
+                // Content-Lengthも明示してチャンク化を抑制し、CDN/プロキシでのキャッシュ判定を安定させる。
+                byte[] body = ctx.responseBodyBytes();
+                response.setContentLength(body.length);
+                OutputStream out = response.getOutputStream();
+                if (body.length > 0) out.write(body);
+                out.flush();
             }
         }), "/*");
 
@@ -218,6 +236,59 @@ public class Gate {
         }
 
         return new GateServer(server);
+    }
+
+    /**
+     * サーブレットと WebSocket アップグレードで共通のリクエストパス解決。
+     * pathInfo → servletPath → "/" の順にフォールバックし、末尾スラッシュを除去する。
+     */
+    private static String resolvePath(HttpServletRequest request) {
+        String path = request.getPathInfo();
+        if (path == null || path.isEmpty()) path = request.getServletPath();
+        if (path == null || path.isEmpty()) path = "/";
+        if (path.length() > 1 && path.endsWith("/")) path = path.substring(0, path.length() - 1);
+        return path;
+    }
+
+    /**
+     * WebSocket アップグレード要求に HTTP と同じ before-filter チェーン
+     * （CloudflareIpFilter / ApiKeyAuth / CfAccessAuth など）を適用する。
+     *
+     * <p>Jetty の WS アップグレードは WebSocketUpgradeFilter がフィルタチェーン先頭で
+     * 処理しサーブレットの service() に到達しないため、ここで実行しない限り
+     * WS ルートは無認証・IP フィルタなしで公開されてしまう。</p>
+     *
+     * <p>制約: {@link JettyServerUpgradeResponse} はボディ書き込み API を持たないため、
+     * 拒否時のボディは Jetty 標準のエラーページになる（ステータスコードとヘッダは反映される）。
+     * 許可時の 101 レスポンスにはヘッダを付けない（CSP 等は 101 には意味がないため）。</p>
+     *
+     * @return アップグレード許可なら true。false の場合は拒否レスポンス送信済み。
+     */
+    private boolean authorizeWsUpgrade(JettyServerUpgradeRequest req, JettyServerUpgradeResponse res) {
+        Context ctx = new Context(resolvePath(req.getHttpServletRequest()), req.getHttpServletRequest());
+        if (ctx.path().contains("..")) {
+            // サーブレット側と同じ多層防御（デコード後パスの ".." を拒否）
+            ctx.status(HttpServletResponse.SC_BAD_REQUEST).halt();
+        } else {
+            try {
+                for (Handler filter : beforeFilters) {
+                    filter.handle(ctx);
+                    if (ctx.isHalted()) break;
+                }
+            } catch (Exception e) {
+                logger.error("WS upgrade filter error: " + e.getMessage(), e);
+                ctx.status(500).halt();
+            }
+        }
+        if (!ctx.isHalted()) return true;
+
+        try {
+            ctx.headers().forEach(res::setHeader);
+            res.sendError(ctx.statusCode(), "WebSocket upgrade rejected");
+        } catch (IOException e) {
+            logger.error("WS upgrade rejection response failed: " + e.getMessage(), e);
+        }
+        return false;
     }
 
     public void scan(String packageName) throws Exception {
@@ -271,6 +342,22 @@ public class Gate {
                 }
             }
         }
+    }
+
+    private static boolean isCancelledKeyException(Throwable t) {
+        for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+            if (cause instanceof java.nio.channels.CancelledKeyException) return true;
+        }
+        return false;
+    }
+
+    private static void installCancelledKeyExceptionSuppressor() {
+        Thread.UncaughtExceptionHandler existing = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            if (isCancelledKeyException(throwable)) return;
+            if (existing != null) existing.uncaughtException(thread, throwable);
+            else throwable.printStackTrace(System.err);
+        });
     }
 
     private void loadAndRegister(String className, ClassLoader classLoader) {

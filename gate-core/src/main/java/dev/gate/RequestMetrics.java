@@ -1,0 +1,485 @@
+package dev.gate;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.Statement;
+import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.ReentrantLock;
+
+import dev.gate.core.Context;
+import dev.gate.core.Database;
+import dev.gate.core.Logger;
+
+public class RequestMetrics {
+    private static final Logger logger            = new Logger(RequestMetrics.class);
+    private static final int    HOURS             = 24;
+    private static final int    MAX_KEYS          = 100;
+    private static final int    MAX_RECENT_ERRORS = 200;
+    private static final int[]  BUCKETS           = {0, 10, 25, 50, 100, 200, 500, 1000, 2000, 5000};
+    private static final RequestMetrics INSTANCE  = new RequestMetrics();
+
+    public record ErrorEntry(String timestamp, String method, String path, int status, long durationMs) {}
+
+    // 時間別リングバッファ
+    private final AtomicLong[]    hourlyCounts   = new AtomicLong[HOURS];
+    private final AtomicLong[]    hourlyErrors   = new AtomicLong[HOURS];
+    // record() の定常パスをロックフリーにするため AtomicLongArray（要素ごとに volatile 可視性）。
+    // ロックを取るのは時間繰り上がり時のリセットだけ。
+    private final AtomicLongArray slotHour       = new AtomicLongArray(HOURS);
+    // ReentrantLockを使う。Java 21 のVirtual Threadで synchronized を使うと
+    // キャリアスレッドがピン留めされるため、高並列時にスループットが落ちる。
+    private final ReentrantLock[] slotLocks      = new ReentrantLock[HOURS];
+    private final long[]          lastFlushedReq = new long[HOURS];
+    private final long[]          lastFlushedErr = new long[HOURS];
+
+    // エンドポイント集計
+    private final ConcurrentHashMap<String, LongAdder> endpointCounts = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, LongAdder> lastFlushedEp  = new ConcurrentHashMap<>();
+
+    // レイテンシヒストグラム
+    private final AtomicLong[] histogram        = new AtomicLong[BUCKETS.length];
+    private final AtomicLong[] lastFlushedHisto = new AtomicLong[BUCKETS.length];
+
+    // 直近エラーバッファ（4xx/5xx、最大200件）
+    private final Deque<ErrorEntry> recentErrors = new ArrayDeque<>(MAX_RECENT_ERRORS);
+    private final Object errorsLock = new Object();
+
+    // 読み取り用スナップショット（45秒ごとのflush後に更新、volatile参照スワップでロック不要）
+    private record MetricsSnapshot(
+        long totalRequests,
+        long errorCount,
+        long[] hourlyCounts,
+        long[] percentiles,
+        List<Map.Entry<String, Long>> topEndpoints
+    ) {}
+    private volatile MetricsSnapshot snapshot = null;
+
+    // 開始時刻は Context attribute に保持する。
+    // 以前は ThreadLocal を使っていたが、Java 21 Virtual Thread では各 VT ごとに
+    // 独立した TL スロットを保持するため、7000 req/s 規模の同時実行時に余分なメモリ/オーバーヘッドが発生する。
+    // Context は 1 リクエスト 1 インスタンスなので attribute で十分かつ低コスト。
+    private static final String START_NANOS_ATTR = "_req_start_nanos";
+
+    private final ScheduledExecutorService scheduler =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "metrics-flush");
+                t.setDaemon(true);
+                return t;
+            });
+
+    private RequestMetrics() {
+        long currentHour = epochHour();
+        for (int i = 0; i < HOURS; i++) {
+            hourlyCounts[i]   = new AtomicLong(0);
+            hourlyErrors[i]   = new AtomicLong(0);
+            slotHour.set(i, currentHour - (HOURS - 1 - i));
+            slotLocks[i]      = new ReentrantLock();
+        }
+        for (int i = 0; i < BUCKETS.length; i++) {
+            histogram[i]        = new AtomicLong(0);
+            lastFlushedHisto[i] = new AtomicLong(0);
+        }
+    }
+
+    public static RequestMetrics get() { return INSTANCE; }
+
+    private long epochHour() { return System.currentTimeMillis() / 3_600_000L; }
+
+    // 永続化
+
+    public void init() {
+        loadFromDb();
+        scheduler.scheduleAtFixedRate(this::flushAll, 45, 45, TimeUnit.SECONDS);
+        // 停止時（Cloud Run SIGTERM / InstanceManager の stop→System.exit など）に
+        // 直近フラッシュ以降（最大45秒分）の差分を取りこぼさないよう最終フラッシュを登録する。
+        Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown, "metrics-shutdown"));
+        logger.info("RequestMetrics永続化有効(45秒ごとにフラッシュ)");
+    }
+
+    public void shutdown() {
+        scheduler.shutdown();
+        flushAll();
+        logger.info("RequestMetrics最終フラッシュ完了");
+    }
+
+    private void loadFromDb() {
+        try (Connection conn = Database.getConnection()) {
+            long since = epochHour() - (HOURS - 1);
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT hour, requests, errors FROM metrics_hourly WHERE hour >= ?")) {
+                ps.setLong(1, since);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        long h   = rs.getLong("hour");
+                        long req = rs.getLong("requests");
+                        long err = rs.getLong("errors");
+                        int  s   = (int)(h % HOURS);
+                        if (s < 0) s += HOURS;
+                        slotLocks[s].lock();
+                        try {
+                            slotHour.set(s, h);
+                            hourlyCounts[s].set(req);
+                            hourlyErrors[s].set(err);
+                            lastFlushedReq[s] = req;
+                            lastFlushedErr[s] = err;
+                        } finally {
+                            slotLocks[s].unlock();
+                        }
+                    }
+                }
+            }
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery("SELECT endpoint, hits FROM metrics_endpoints WHERE date = CURDATE()")) {
+                while (rs.next()) {
+                    String ep   = rs.getString("endpoint");
+                    long   hits = rs.getLong("hits");
+                    if (endpointCounts.size() < MAX_KEYS) {
+                        LongAdder la = endpointCounts.computeIfAbsent(ep, k -> new LongAdder());
+                        la.add(hits);
+                        lastFlushedEp.computeIfAbsent(ep, k -> new LongAdder()).add(hits);
+                    }
+                }
+            }
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(
+                         "SELECT bucket_ms, count FROM metrics_latency_histogram ORDER BY bucket_ms")) {
+                while (rs.next()) {
+                    int  bms   = rs.getInt("bucket_ms");
+                    long count = rs.getLong("count");
+                    int  idx   = bucketIndex(bms);
+                    if (idx >= 0) {
+                        histogram[idx].set(count);
+                        lastFlushedHisto[idx].set(count);
+                    }
+                }
+            }
+            logger.info("RequestMetrics: DBから復元完了");
+        } catch (Exception e) {
+            logger.warn("RequestMetrics: DB復元失敗（初期値で起動）: {}", e.getMessage());
+        }
+        refreshSnapshot();
+    }
+
+    private void flushAll() {
+        flushHourly();
+        flushEndpoints();
+        flushHistogram();
+        refreshSnapshot();
+    }
+
+    private void flushHourly() {
+        try (Connection conn = Database.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "INSERT INTO metrics_hourly(hour, requests, errors) VALUES(?, ?, ?) AS new " +
+                     "ON DUPLICATE KEY UPDATE " +
+                     "requests = metrics_hourly.requests + new.requests, " +
+                     "errors   = metrics_hourly.errors   + new.errors")) {
+            long currentHour = epochHour();
+            for (int i = 0; i < HOURS; i++) {
+                long targetHour = currentHour - (HOURS - 1) + i;
+                int  s          = (int)(targetHour % HOURS);
+                if (s < 0) s += HOURS;
+                long req, err, diffReq, diffErr;
+                slotLocks[s].lock();
+                try {
+                    if (slotHour.get(s) != targetHour) continue;
+                    req     = hourlyCounts[s].get();
+                    err     = hourlyErrors[s].get();
+                    diffReq = req - lastFlushedReq[s];
+                    diffErr = err - lastFlushedErr[s];
+                    if (diffReq <= 0 && diffErr <= 0) continue;
+                    lastFlushedReq[s] = req;
+                    lastFlushedErr[s] = err;
+                } finally {
+                    slotLocks[s].unlock();
+                }
+                ps.setLong(1, targetHour);
+                ps.setLong(2, diffReq > 0 ? diffReq : 0);
+                ps.setLong(3, diffErr > 0 ? diffErr : 0);
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        } catch (Exception e) {
+            logger.warn("metrics hourly flush failed: {}", e.getMessage());
+        }
+    }
+
+    private void flushEndpoints() {
+        if (endpointCounts.isEmpty()) return;
+        try (Connection conn = Database.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "INSERT INTO metrics_endpoints(endpoint, date, hits) VALUES(?, CURDATE(), ?) AS new " +
+                     "ON DUPLICATE KEY UPDATE hits = metrics_endpoints.hits + new.hits")) {
+            for (Map.Entry<String, LongAdder> e : endpointCounts.entrySet()) {
+                long current = e.getValue().sum();
+                long flushed = lastFlushedEp.computeIfAbsent(e.getKey(), k -> new LongAdder()).sum();
+                long diff    = current - flushed;
+                if (diff <= 0) continue;
+                ps.setString(1, e.getKey());
+                ps.setLong(2, diff);
+                ps.addBatch();
+                lastFlushedEp.get(e.getKey()).add(diff);
+            }
+            ps.executeBatch();
+        } catch (Exception e) {
+            logger.warn("metrics endpoints flush failed: {}", e.getMessage());
+        }
+    }
+
+    private void flushHistogram() {
+        try (Connection conn = Database.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "INSERT INTO metrics_latency_histogram(bucket_ms, count) VALUES(?, ?) AS new " +
+                     "ON DUPLICATE KEY UPDATE count = metrics_latency_histogram.count + new.count")) {
+            for (int i = 0; i < BUCKETS.length; i++) {
+                long current = histogram[i].get();
+                long flushed = lastFlushedHisto[i].get();
+                long diff    = current - flushed;
+                if (diff <= 0) continue;
+                ps.setInt(1, BUCKETS[i]);
+                ps.setLong(2, diff);
+                ps.addBatch();
+                lastFlushedHisto[i].addAndGet(diff);
+            }
+            ps.executeBatch();
+        } catch (Exception e) {
+            logger.warn("metrics histogram flush failed: {}", e.getMessage());
+        }
+    }
+
+    // beforeフィルタ
+
+    public void startTimer(Context ctx) {
+        ctx.setAttribute(START_NANOS_ATTR, System.nanoTime());
+    }
+
+    // afterフィルタ
+
+    public void record(Context ctx) {
+        String path = ctx.path();
+
+        boolean isError = ctx.statusCode() >= 500;
+
+        long hour = epochHour();
+        int  slot = (int)(hour % HOURS);
+        // 定常パス: 当該スロットが既に現在時間ならロック無しで AtomicLong を増やすだけ。
+        // 7000 req/s 規模でも同一時間帯の全リクエストが単一ロックへ直列化するのを避ける。
+        if (slotHour.get(slot) == hour) {
+            hourlyCounts[slot].incrementAndGet();
+            if (isError) hourlyErrors[slot].incrementAndGet();
+        } else {
+            // 時間繰り上がり（24時間に1回/スロット）のみロックして二重チェック後にリセット。
+            slotLocks[slot].lock();
+            try {
+                if (slotHour.get(slot) != hour) {
+                    // カウンタを先に確定してから slotHour を公開する。
+                    // これより前に fast-path に入る他スレッドは旧 hour を見て else 側（ロック待ち）に回る。
+                    hourlyCounts[slot].set(1);
+                    hourlyErrors[slot].set(isError ? 1 : 0);
+                    lastFlushedReq[slot] = 0;
+                    lastFlushedErr[slot] = 0;
+                    slotHour.set(slot, hour);
+                } else {
+                    // ロック待ちの間に別スレッドがリセット済み
+                    hourlyCounts[slot].incrementAndGet();
+                    if (isError) hourlyErrors[slot].incrementAndGet();
+                }
+            } finally {
+                slotLocks[slot].unlock();
+            }
+        }
+
+        if ((isError || ctx.statusCode() == 429) && !"/health".equals(path)) {
+            // ctx.responseBody() にJSONエラーメッセージが入っている
+            DiscordWebhook.sendError(
+                ctx.method(), path, ctx.statusCode(), ctx.responseBody());
+        }
+
+        Long start = ctx.getAttribute(START_NANOS_ATTR);
+        long durationMs = start != null ? (System.nanoTime() - start) / 1_000_000L : -1L;
+        if (durationMs >= 0) {
+            histogram[upperBucketIndex(durationMs)].incrementAndGet();
+        }
+
+        if (ctx.statusCode() >= 400 && !"/health".equals(path)) {
+            synchronized (errorsLock) {
+                if (recentErrors.size() >= MAX_RECENT_ERRORS) recentErrors.pollFirst();
+                recentErrors.addLast(new ErrorEntry(
+                    Instant.now().toString(), ctx.method(), path, ctx.statusCode(), durationMs));
+            }
+        }
+
+        String key = ctx.method() + " " + path;
+        if (endpointCounts.size() < MAX_KEYS) {
+            endpointCounts.computeIfAbsent(key, k -> new LongAdder()).increment();
+        } else {
+            endpointCounts.computeIfPresent(key, (k, v) -> { v.increment(); return v; });
+        }
+    }
+
+    public List<ErrorEntry> getRecentErrors(Instant from, Instant to) {
+        List<ErrorEntry> result = new ArrayList<>();
+        synchronized (errorsLock) {
+            for (ErrorEntry e : recentErrors) {
+                Instant t = Instant.parse(e.timestamp());
+                if (!t.isBefore(from) && !t.isAfter(to)) result.add(e);
+            }
+        }
+        return result;
+    }
+
+    // 読み取り（snapshotから返す。45秒ごとのflushで更新される）
+
+    public long getTotalRequests() {
+        MetricsSnapshot s = snapshot;
+        return s != null ? s.totalRequests() : 0L;
+    }
+
+    public long getErrorCount() {
+        MetricsSnapshot s = snapshot;
+        return s != null ? s.errorCount() : 0L;
+    }
+
+    public double getErrorRate() {
+        MetricsSnapshot s = snapshot;
+        if (s == null || s.totalRequests() == 0) return 0.0;
+        return (s.errorCount() * 100.0) / s.totalRequests();
+    }
+
+    public long[] getHourlyCounts() {
+        MetricsSnapshot s = snapshot;
+        return s != null ? s.hourlyCounts().clone() : new long[HOURS];
+    }
+
+    public long[] getPercentiles() {
+        MetricsSnapshot s = snapshot;
+        return s != null ? s.percentiles() : new long[]{0, 0};
+    }
+
+    public List<Map.Entry<String, Long>> getTopEndpoints(int n) {
+        MetricsSnapshot s = snapshot;
+        if (s == null) return Collections.emptyList();
+        List<Map.Entry<String, Long>> all = s.topEndpoints();
+        return n >= all.size() ? all : all.subList(0, n);
+    }
+
+    public List<Map.Entry<String, Long>> getEndpointsByDate(String date) {
+        try (Connection conn = Database.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT endpoint, hits FROM metrics_endpoints WHERE date = ? ORDER BY hits DESC")) {
+            ps.setString(1, date);
+            List<Map.Entry<String, Long>> result = new ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) result.add(Map.entry(rs.getString("endpoint"), rs.getLong("hits")));
+            }
+            return result;
+        } catch (Exception e) {
+            logger.warn("getEndpointsByDate DB error: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    // snapshotをDBから再構築（flushAll・loadFromDb後に呼ぶ）
+    public void refreshSnapshot() {
+        try (Connection conn = Database.getConnection()) {
+            long currentHour = epochHour();
+            long since = currentHour - (HOURS - 1);
+
+            long total = 0, errors = 0;
+            long[] hourly = new long[HOURS];
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT hour, requests, errors FROM metrics_hourly WHERE hour >= ?")) {
+                ps.setLong(1, since);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        long h   = rs.getLong("hour");
+                        long req = rs.getLong("requests");
+                        long err = rs.getLong("errors");
+                        total  += req;
+                        errors += err;
+                        int idx = (int)(h - since);
+                        if (idx >= 0 && idx < HOURS) hourly[idx] = req;
+                    }
+                }
+            }
+
+            long[] percents = computePercentilesFromDb(conn);
+
+            List<Map.Entry<String, Long>> top = new ArrayList<>();
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT endpoint, SUM(hits) AS hits FROM metrics_endpoints " +
+                    "GROUP BY endpoint ORDER BY SUM(hits) DESC LIMIT 20")) {
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next())
+                        top.add(Map.entry(rs.getString("endpoint"), rs.getLong("hits")));
+                }
+            }
+
+            snapshot = new MetricsSnapshot(total, errors, hourly, percents, List.copyOf(top));
+        } catch (Exception e) {
+            logger.warn("refreshSnapshot failed: {}", e.getMessage());
+        }
+    }
+    // p50 p95 計算のDBクエリ  
+    private long[] computePercentilesFromDb(Connection conn) throws Exception {
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(
+                     "SELECT bucket_ms, count FROM metrics_latency_histogram ORDER BY bucket_ms")) {
+            long[] counts = new long[BUCKETS.length];
+            long total    = 0;
+            while (rs.next()) {
+                int idx = bucketIndex(rs.getInt("bucket_ms"));
+                if (idx >= 0) { counts[idx] = rs.getLong("count"); total += counts[idx]; }
+            }
+            if (total == 0) return new long[]{0, 0};
+            return new long[]{
+                percentileFromHistogram(counts, total, 50),
+                percentileFromHistogram(counts, total, 95)
+            };
+        }
+    }
+
+    // バケットヘルパー
+    private long percentileFromHistogram(long[] counts, long total, int pct) {
+        long target = (long) Math.ceil(total * pct / 100.0);
+        long cumul  = 0;
+        for (int i = 0; i < BUCKETS.length; i++) {
+            cumul += counts[i];
+            if (cumul >= target) {
+                // 上限（次バケットの下限）を返す。
+                // 例: 0-9ms バケット → 10ms, 10-24ms バケット → 25ms
+                // 最終バケットはその下限をそのまま返す。
+                return i + 1 < BUCKETS.length ? BUCKETS[i + 1] : BUCKETS[i];
+            }
+        }
+        return BUCKETS[BUCKETS.length - 1];
+    }
+
+    private int upperBucketIndex(long ms) {
+        for (int i = BUCKETS.length - 1; i >= 0; i--) {
+            if (ms >= BUCKETS[i]) return i;
+        }
+        return 0;
+    }
+
+    private int bucketIndex(int bucketMs) {
+        for (int i = 0; i < BUCKETS.length; i++) {
+            if (BUCKETS[i] == bucketMs) return i;
+        }
+        return -1;
+    }
+}

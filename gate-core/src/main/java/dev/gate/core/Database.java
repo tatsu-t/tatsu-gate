@@ -14,39 +14,37 @@ import java.util.stream.Collectors;
 public class Database {
     private static final Logger logger = new Logger(Database.class);
     private static volatile HikariDataSource dataSource;
+    private static volatile boolean ready = false;
+
+    public static boolean isReady() { return ready; }
 
     public static void init(Config.DatabaseConfig config) throws Exception {
         HikariConfig hikari = new HikariConfig();
 
-        String cloudSqlInstance = envOrDefault("CLOUD_SQL_INSTANCE", config.getCloudSqlInstance());
-        String dbName    = envOrDefault("DB_NAME",     config.getName());
-        String user      = envOrDefault("DB_USER",     config.getUser());
-        String password  = envOrDefault("DB_PASSWORD", config.getPassword());
-        int    poolSize  = config.getMaxPoolSize();
+        String dbName   = envOrDefault("DB_NAME",     config.getName());
+        String user     = envOrDefault("DB_USER",     config.getUser());
+        String password = envOrDefault("DB_PASSWORD", config.getPassword());
+        String host     = envOrDefault("DB_HOST",     config.getHost());
+        int    port     = Integer.parseInt(envOrDefault("DB_PORT", String.valueOf(config.getPort())));
+        int    poolSize = config.getMaxPoolSize();
 
-        if (!cloudSqlInstance.isBlank()) {
-            hikari.setJdbcUrl(String.format(
-                "jdbc:postgresql:///%s?cloudSqlInstance=%s&socketFactory=com.google.cloud.sql.postgres.SocketFactory",
-                dbName, cloudSqlInstance
-            ));
-            logger.info("Connecting to Cloud SQL: {}/{}", cloudSqlInstance, dbName);
-        } else {
-            String host = envOrDefault("DB_HOST", config.getHost());
-            int    port = Integer.parseInt(envOrDefault("DB_PORT", String.valueOf(config.getPort())));
-            String sslMode = config.isSsl() ? "require" : "disable";
-            hikari.setJdbcUrl(String.format(
-                "jdbc:postgresql://%s:%d/%s?sslmode=%s&connectTimeout=5&socketTimeout=30",
-                host, port, dbName, sslMode
-            ));
-            logger.info("Connecting to PostgreSQL at {}:{}/{}", host, port, dbName);
-        }
+        boolean ssl = Boolean.parseBoolean(envOrDefault("DB_SSL", String.valueOf(config.isSsl())));
+        String sslParams = ssl
+            ? "useSSL=true&requireSSL=true&trustServerCertificate=true"
+            : "useSSL=false&allowPublicKeyRetrieval=true";
+
+        hikari.setJdbcUrl(String.format(
+            "jdbc:mysql://%s:%d/%s?%s&tinyInt1isBit=false&useUnicode=true&characterEncoding=UTF-8&connectTimeout=5000&socketTimeout=30000",
+            host, port, dbName, sslParams
+        ));
+        logger.info("Connecting to MySQL at {}:{}/{} (ssl={})", host, port, dbName, ssl);
 
         hikari.setUsername(user);
         hikari.setPassword(password);
         hikari.setMaximumPoolSize(poolSize);
-        hikari.setMinimumIdle(poolSize / 2);
+        hikari.setMinimumIdle(3);
         hikari.setPoolName("gate-pool");
-        hikari.setInitializationFailTimeout(10_000);
+        hikari.setInitializationFailTimeout(-1);
         hikari.setConnectionTimeout(5_000);
         hikari.setIdleTimeout(600_000);
         hikari.setMaxLifetime(1_800_000);
@@ -59,9 +57,12 @@ public class Database {
         } catch (Exception e) {
             ds.close();
             dataSource = null;
+            // DB初期化失敗を通知
+            dev.gate.DiscordWebhook.sendError("DB", "INIT", 500, "Database initialization failed: " + e.getMessage());
             throw e;
         }
         logger.info("Database connection pool initialized");
+        ready = true;
     }
 
     public static Connection getConnection() throws SQLException {
@@ -86,7 +87,7 @@ public class Database {
             String full = new String(is.readAllBytes(), StandardCharsets.UTF_8);
             // Strip -- line comments before splitting on ; to support multi-statement files
             String stripped = Arrays.stream(full.split("\n"))
-                    .map(line -> { int i = line.indexOf("--"); return i >= 0 ? line.substring(0, i) : line; })
+                    .map(Database::stripLineComment)
                     .collect(Collectors.joining("\n"));
             try (Connection conn = getConnection()) {
                 for (String raw : stripped.split(";")) {
@@ -99,6 +100,26 @@ public class Database {
             }
         }
         logger.info("Schema applied");
+    }
+
+    /** -- コメントを除去するが、シングルクォート内のものは除外する（SQL標準の '' エスケープに対応）。 */
+    static String stripLineComment(String line) {
+        boolean inString = false;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '\'') {
+                if (!inString) {
+                    inString = true;
+                } else if (i + 1 < line.length() && line.charAt(i + 1) == '\'') {
+                    i++; // SQL標準の '' エスケープをスキップ
+                } else {
+                    inString = false;
+                }
+            } else if (!inString && c == '-' && i + 1 < line.length() && line.charAt(i + 1) == '-') {
+                return line.substring(0, i);
+            }
+        }
+        return line;
     }
 
     private static String envOrDefault(String key, String defaultValue) {
