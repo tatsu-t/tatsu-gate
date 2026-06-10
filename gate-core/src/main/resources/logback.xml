@@ -1,23 +1,11 @@
 <configuration>
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
-        <filter class="dev.gate.logging.CancelledKeyExceptionFilter"/>
         <encoder>
             <pattern>%d{HH:mm:ss} [%level] %logger{20} - %msg%n</pattern>
         </encoder>
     </appender>
 
-    <appender name="BUFFER" class="dev.gate.logging.LogBuffer"/>
-
-    <!-- サードパーティライブラリの冗長なログを抑制 -->
-    <!-- additivity="false" で root への伝播を止め、root レベルに関わらず確実に抑制する -->
-    <logger name="org.eclipse.jetty" level="OFF"  additivity="false"/>
-    <logger name="com.zaxxer.hikari" level="WARN" additivity="false"/>
-    <logger name="com.mysql"         level="WARN" additivity="false"/>
-    <logger name="org.slf4j"         level="WARN" additivity="false"/>
-
-    <!-- アプリ内ログは LOG_LEVEL 環境変数で制御 (デフォルト INFO) -->
     <root level="${LOG_LEVEL:-INFO}">
         <appender-ref ref="CONSOLE"/>
-        <appender-ref ref="BUFFER"/>
     </root>
 </configuration>
