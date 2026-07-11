@@ -1,4 +1,4 @@
-package dev.gate.middleware;
+package dev.gate.modules.security;
 
 import dev.gate.core.Context;
 import dev.gate.core.Handler;

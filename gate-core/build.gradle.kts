@@ -13,7 +13,8 @@ java {
 
 dependencies {
     implementation("org.eclipse.jetty:jetty-server:11.0.20")
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.17.0") {
+    // api: Json.MAPPER exposes ObjectMapper as part of the public API
+    api("com.fasterxml.jackson.core:jackson-databind:2.17.0") {
         exclude(group = "net.bytebuddy")
     }
     implementation("org.yaml:snakeyaml:2.2")
