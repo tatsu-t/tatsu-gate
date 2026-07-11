@@ -14,7 +14,7 @@ import org.eclipse.jetty.websocket.server.config.JettyWebSocketServletContainerI
 
 import java.io.File;
 import java.io.IOException;
-import java.io.PrintWriter;
+import java.io.OutputStream;
 import java.net.JarURLConnection;
 import java.net.URL;
 import java.nio.file.Paths;
@@ -159,26 +159,31 @@ public class Gate {
                         }
                     }
 
-                    if ("OPTIONS".equals(request.getMethod())) {
-                        response.setStatus(204);
-                        return;
-                    }
-
+                    // OPTIONS preflights also pass through before-filters so that
+                    // network-level checks (e.g. IP allowlists) apply to them too.
+                    // Filters that require credentials (API keys, JWTs) must skip
+                    // OPTIONS themselves — browsers do not send credentials in preflights.
                     for (Handler filter : beforeFilters) {
                         filter.handle(ctx);
                         if (ctx.isHalted()) break;
                     }
 
                     if (!ctx.isHalted()) {
-                        String key = request.getMethod() + ':' + path;
-                        router.find(key).ifPresentOrElse(
-                            match -> {
-                                ctx.setPathParams(match.pathParams());
-                                match.handler().handle(ctx);
-                            },
-                            () -> ctx.status(404).result("404 Not Found")
-                        );
+                        if ("OPTIONS".equals(request.getMethod())) {
+                            ctx.status(204);
+                        } else {
+                            String key = request.getMethod() + ':' + path;
+                            router.find(key).ifPresentOrElse(
+                                match -> {
+                                    ctx.setPathParams(match.pathParams());
+                                    match.handler().handle(ctx);
+                                },
+                                () -> ctx.status(404).result("404 Not Found")
+                            );
+                        }
                     }
+                } catch (ClientErrorException ce) {
+                    ctx.status(ce.status()).json(java.util.Map.of("error", ce.getMessage()));
                 } catch (Exception e) {
                     errorHandler.handle(ctx, e);
                 } finally {
@@ -196,9 +201,14 @@ public class Gate {
                 ctx.headers().forEach(response::setHeader);
                 response.setContentType(ctx.contentType());
 
-                PrintWriter writer = response.getWriter();
-                writer.print(ctx.responseBody());
-                writer.flush();
+                // Write UTF-8 bytes directly (avoids String→char[]→byte[] double conversion).
+                // Explicit Content-Length suppresses chunking, which keeps CDN/proxy
+                // cacheability decisions stable.
+                byte[] body = ctx.responseBodyBytes();
+                response.setContentLength(body.length);
+                OutputStream out = response.getOutputStream();
+                if (body.length > 0) out.write(body);
+                out.flush();
             }
         }), "/*");
 

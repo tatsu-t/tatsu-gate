@@ -14,6 +14,8 @@ Java 21 向け軽量 HTTP フレームワーク。Jetty をベースに仮想ス
 - [WebSocket](#websocket)
 - [CORS](#cors)
 - [エラーハンドリング](#エラーハンドリング)
+- [共有ユーティリティ](#共有ユーティリティ)
+- [モジュール](#モジュール)
 - [データベース](#データベース)
 - [設定](#設定)
 - [サーバーライフサイクル](#サーバーライフサイクル)
@@ -163,11 +165,22 @@ public void get(Context ctx) {
 |---|---|
 | `ctx.result("text")` | テキストレスポンス（`text/plain; charset=utf-8`） |
 | `ctx.json(object)` | JSON レスポンス（`application/json; charset=utf-8`） |
+| `ctx.jsonRaw("{...}")` | シリアライズ済み JSON 文字列をそのままボディに設定 |
+| `ctx.jsonBytes(bytes)` | シリアライズ済み UTF-8 JSON バイト列をゼロコピーで設定（キャッシュ層向け） |
 | `ctx.status(201)` | HTTP ステータスコードを設定（デフォルト: `200`） |
 | `ctx.header("X-Key", "val")` | レスポンスヘッダを設定。キーまたは値に `\r`/`\n` が含まれる場合は `IllegalArgumentException` |
 
 ```java
 ctx.status(404).json(Map.of("error", "not found"));
+```
+
+### アトリビュート
+
+リクエスト単位のアトリビュートで、ミドルウェアからルートハンドラへデータ（検証済みの認証情報など）を渡せます：
+
+```java
+ctx.setAttribute("verified_email", email);   // before フィルタ内
+String email = ctx.getAttribute("verified_email");  // ハンドラ内
 ```
 
 ## ミドルウェア
@@ -255,7 +268,7 @@ Access-Control-Max-Age: 86400
 
 オリジンが `"*"` でない場合のみ `Access-Control-Allow-Credentials: true` が追加されます。
 
-プリフライト `OPTIONS` リクエストは即座に `204` を返します。OPTIONS リクエストでは before フィルタは実行されません。
+プリフライト `OPTIONS` リクエストも before フィルタを通過してから（IP 許可リスト等のネットワークレベルのチェックを適用するため）、ルートハンドラを実行せずに `204` を返します。認証情報を要求するフィルタは自分で OPTIONS をスキップしてください — ブラウザはプリフライトに認証情報を付けません。
 
 ## エラーハンドリング
 
@@ -271,6 +284,75 @@ after フィルタ内でスローされた例外はログに記録されて握�
 エラーハンドラ自身が例外をスローした場合、その例外はキャッチされません。after フィルタは
 `finally` により実行されますが、レスポンス書き込みがスキップされ不完全なレスポンスが返る可能性があります。
 エラーハンドラは例外が発生しないシンプルな実装にしてください。
+
+### ClientErrorException
+
+フィルタやハンドラから `ClientErrorException(status, message)` をスローすると、指定した 4xx ステータスと
+`{"error": message}` の JSON ボディでリクエストを打ち切れます。エラーハンドラより**前に**フレームワークが
+キャッチするため、クライアント起因のエラーがサーバーエラー処理（やそこに紐づくアラート）と混ざりません。
+リクエストボディのサイズ超過（413）ではフレームワーク自身がこの例外を投げます。
+
+```java
+if (!valid(input)) throw new ClientErrorException(422, "invalid input");
+```
+
+## 共有ユーティリティ
+
+| クラス | 説明 |
+|---|---|
+| `Json.MAPPER` | アプリ全体で共有する Jackson `ObjectMapper`。設定を変えたい場合は `Json.MAPPER.copy()` で派生させ、共有インスタンスは変更しないこと。 |
+| `Http.CLIENT` | アプリ全体で共有する `java.net.http.HttpClient`（接続タイムアウト 5 秒）。読み取りタイムアウトは `HttpRequest.timeout(...)` でリクエスト単位に指定。 |
+
+クラスごとに個別インスタンスを持つとシリアライザキャッシュやコネクションプールが重複するため、
+アプリ内（および `gate-modules` 内）の全クラスで 1 インスタンスを共有します。
+
+## モジュール
+
+`gate-core` は超最低限（ルーティング・Context・ミドルウェア・WebSocket・設定・DB プール）に保ち、
+それ以外はオプションの `gate-modules` に置いています。内容は実運用（Cloudflare + Cloud Run 構成で
+トラフィックを捌いた学祭バックエンド）から抽出したミドルウェアとユーティリティです：
+
+```kotlin
+dependencies {
+    implementation(project(":gate-core"))
+    implementation(project(":gate-modules"))  // 任意
+}
+```
+
+| パッケージ | クラス | 説明 |
+|---|---|---|
+| `modules.security` | `SecurityHeaders` | セキュリティ系レスポンスヘッダ（CSP・HSTS 等）を付与する after フィルタ（ビルダー式） |
+| `modules.metrics` | `RequestMetrics` | ロックフリーのリクエスト数・p50/p95 レイテンシ・24h リングバッファ・上位エンドポイント |
+| `modules.auth` | `ApiKeyAuth` | `X-API-Key` 認証（定数時間比較）。読み取り専用キーの段階も任意で設定可能 |
+| `modules.cloudflare` | `CloudflareIpFilter` | Cloudflare 経由以外のリクエストを拒否（XFF/CIDR 検証、または `ORIGIN_SHARED_SECRET` ヘッダ） |
+| `modules.cloudflare` | `CfAccessAuth` | 管理ルート向け Cloudflare Access JWT 検証（JWKS 取得 + RS256、JWT ライブラリ不使用） |
+| `modules.cloudflare` | `CfPurge` | Cloudflare キャッシュ purge（全体 / URL 単位）。書き込み起点でエッジ鮮度をイベント駆動に |
+| `modules.firebase` | `FirebaseAppCheckAuth` | クライアント書き込みエンドポイント向け Firebase App Check JWT 検証 |
+| `modules.cache` | `TtlCache` | stale-on-error 付き TTL キャッシュ |
+| `modules.cache` | `HttpCache` | ETag/gzip 事前計算エントリ + RFC 9110 条件付きレスポンス配信（`304`・`Vary`） |
+| `modules.cache` | `BoundedLruCache` | サイズ上限付き LRU（TTL 任意）。Caffeine 不使用で native-image フレンドリー |
+| `modules.idempotency` | `IdempotencyFilter` | `X-Request-Id` による重複書き込み拒否（400/409） |
+| `modules.routes` | `YamlRouteLoader` | `routes.yaml` から読み取り専用 GET ルートを宣言的に登録（SQL は allowlist 検証、背景更新キャッシュ対応） |
+| `modules.audit` | `AuditLog` | 管理操作を監査テーブルへ記録。失敗しても操作自体は壊さない |
+| `modules.notify` | `DiscordWebhook` | エラー・管理操作の Discord 通知（キー単位のデバウンス付き） |
+| `modules.logging` | `LogBuffer` | 直近 300 件のログをメモリに保持する Logback アペンダ（管理エンドポイント向け） |
+| `modules.logging` | `CancelledKeyExceptionFilter` | 無害なクライアント切断ノイズを落とす Logback フィルタ |
+
+典型的な組み込み（順序が重要 — ネットワークチェック → 認証 → メトリクス）：
+
+```java
+Gate gate = new Gate();
+gate.before(new CloudflareIpFilter());
+gate.before(ApiKeyAuth.builder().key(System.getenv("API_KEY")).exemptPath("/health").build());
+gate.before(new CfAccessAuth());              // /admin を保護
+gate.before(RequestMetrics.get()::startTimer);
+gate.after(RequestMetrics.get()::record);
+gate.after(SecurityHeaders.defaults()::handle);
+```
+
+モジュールの設定は環境変数で行います。詳細は各クラスの Javadoc を参照してください
+（`API_KEY`、`CF_ACCESS_AUD`、`CF_ACCESS_TEAM_DOMAIN`、`ADMIN_EMAILS`、`CF_API_TOKEN`、
+`CF_ZONE_ID`、`FIREBASE_PROJECT_ID`、`DISCORD_WEBHOOK_URL` など）。
 
 ## データベース
 

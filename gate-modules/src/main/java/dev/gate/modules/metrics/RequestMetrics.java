@@ -1,4 +1,4 @@
-package dev.gate.metrics;
+package dev.gate.modules.metrics;
 
 import dev.gate.core.Context;
 import dev.gate.core.Handler;

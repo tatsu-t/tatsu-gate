@@ -14,6 +14,8 @@ A lightweight HTTP framework for Java 21, built on Jetty with virtual thread sup
 - [WebSocket](#websocket)
 - [CORS](#cors)
 - [Error Handling](#error-handling)
+- [Shared Utilities](#shared-utilities)
+- [Modules](#modules)
 - [Database](#database)
 - [Configuration](#configuration)
 - [Server Lifecycle](#server-lifecycle)
@@ -163,11 +165,22 @@ All response methods return `this` for chaining.
 |---|---|
 | `ctx.result("text")` | Plain text response (`text/plain; charset=utf-8`) |
 | `ctx.json(object)` | JSON response via Jackson (`application/json; charset=utf-8`) |
+| `ctx.jsonRaw("{...}")` | Pre-serialized JSON string as the response body |
+| `ctx.jsonBytes(bytes)` | Pre-serialized UTF-8 JSON bytes — zero-copy path for cache layers |
 | `ctx.status(201)` | Set HTTP status code (default: `200`) |
 | `ctx.header("X-Key", "val")` | Set response header. Throws `IllegalArgumentException` if key or value contains `\r` or `\n`. |
 
 ```java
 ctx.status(404).json(Map.of("error", "not found"));
+```
+
+### Attributes
+
+Per-request attributes let middleware pass data (e.g. a verified identity) to route handlers:
+
+```java
+ctx.setAttribute("verified_email", email);   // in a before filter
+String email = ctx.getAttribute("verified_email");  // in a handler
 ```
 
 ## Middleware
@@ -255,7 +268,9 @@ Access-Control-Max-Age: 86400
 
 `Access-Control-Allow-Credentials: true` is added only when the origin is not `"*"`.
 
-Preflight `OPTIONS` requests return `204` immediately. Before filters do not run for OPTIONS requests.
+Preflight `OPTIONS` requests pass through before filters (so network-level checks such as IP
+allowlists still apply) and then return `204` without invoking a route handler. Filters that
+require credentials must skip OPTIONS themselves — browsers do not send credentials in preflights.
 
 ## Error Handling
 
@@ -270,6 +285,76 @@ Exceptions thrown inside after filters are logged and swallowed — they do not 
 
 If the error handler itself throws an exception, that exception is not caught. After filters still
 run via `finally`, but the response may be incomplete. Keep error handlers simple and exception-free.
+
+### ClientErrorException
+
+Throwing `ClientErrorException(status, message)` from a filter or handler short-circuits the
+request with the given 4xx status and a `{"error": message}` JSON body. It is caught by the
+framework *before* the error handler, so client errors stay separate from server-error handling
+(and any alerting wired into it). The framework itself throws it for oversized request bodies (413).
+
+```java
+if (!valid(input)) throw new ClientErrorException(422, "invalid input");
+```
+
+## Shared Utilities
+
+| Class | Description |
+|---|---|
+| `Json.MAPPER` | Single shared Jackson `ObjectMapper`. Derive with `Json.MAPPER.copy()` if you need different settings; never mutate the shared instance. |
+| `Http.CLIENT` | Single shared `java.net.http.HttpClient` (5 s connect timeout). Set per-request read timeouts with `HttpRequest.timeout(...)`. |
+
+Both exist so every class in an app (and in `gate-modules`) reuses one instance instead of
+paying per-class serializer caches or extra connection pools.
+
+## Modules
+
+The `gate-core` artifact stays minimal: routing, Context, middleware, WebSocket, config, and
+database pooling. Everything else lives in the optional `gate-modules` artifact — production
+middleware and utilities extracted from a real deployment (a festival backend serving traffic
+behind Cloudflare on Cloud Run):
+
+```kotlin
+dependencies {
+    implementation(project(":gate-core"))
+    implementation(project(":gate-modules"))  // optional
+}
+```
+
+| Package | Class | Description |
+|---|---|---|
+| `modules.security` | `SecurityHeaders` | After-filter adding security response headers (CSP, HSTS, etc.) via a builder |
+| `modules.metrics` | `RequestMetrics` | Lock-free request counters, p50/p95 latency, hourly ring buffer, top endpoints |
+| `modules.auth` | `ApiKeyAuth` | `X-API-Key` auth (constant-time compare) with optional read-only key tier |
+| `modules.cloudflare` | `CloudflareIpFilter` | Rejects requests not arriving via Cloudflare (XFF/CIDR check, or `ORIGIN_SHARED_SECRET` header) |
+| `modules.cloudflare` | `CfAccessAuth` | Cloudflare Access JWT validation for admin routes (JWKS fetch + RS256, no JWT library) |
+| `modules.cloudflare` | `CfPurge` | Cloudflare cache purge (everything / by URL) for event-driven edge freshness |
+| `modules.firebase` | `FirebaseAppCheckAuth` | Firebase App Check JWT verification for client-write endpoints |
+| `modules.cache` | `TtlCache` | TTL cache with stale-on-error semantics |
+| `modules.cache` | `HttpCache` | Precomputed ETag/gzip entries + RFC 9110 conditional serving (`304`, `Vary`) |
+| `modules.cache` | `BoundedLruCache` | Size-bounded LRU with optional TTL (Caffeine-free, native-image friendly) |
+| `modules.idempotency` | `IdempotencyFilter` | `X-Request-Id` based duplicate-write rejection (400/409) |
+| `modules.routes` | `YamlRouteLoader` | Declarative read-only GET routes from `routes.yaml` (allowlist-validated SQL, optional background-refreshed cache) |
+| `modules.audit` | `AuditLog` | Writes admin operations to an audit table; failures never break the operation |
+| `modules.notify` | `DiscordWebhook` | Error/admin-op notifications to Discord with per-key debouncing |
+| `modules.logging` | `LogBuffer` | Logback appender keeping the last 300 log entries in memory for admin endpoints |
+| `modules.logging` | `CancelledKeyExceptionFilter` | Logback filter dropping harmless client-disconnect noise |
+
+Typical wiring (order matters — network checks first, then auth, then metrics):
+
+```java
+Gate gate = new Gate();
+gate.before(new CloudflareIpFilter());
+gate.before(ApiKeyAuth.builder().key(System.getenv("API_KEY")).exemptPath("/health").build());
+gate.before(new CfAccessAuth());              // protects /admin
+gate.before(RequestMetrics.get()::startTimer);
+gate.after(RequestMetrics.get()::record);
+gate.after(SecurityHeaders.defaults()::handle);
+```
+
+Modules are configured through environment variables — see each class's Javadoc for details
+(`API_KEY`, `CF_ACCESS_AUD`, `CF_ACCESS_TEAM_DOMAIN`, `ADMIN_EMAILS`, `CF_API_TOKEN`,
+`CF_ZONE_ID`, `FIREBASE_PROJECT_ID`, `DISCORD_WEBHOOK_URL`, ...).
 
 ## Database
 

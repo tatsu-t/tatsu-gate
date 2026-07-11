@@ -1,6 +1,5 @@
 package dev.gate.core;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.nio.charset.Charset;
@@ -11,17 +10,18 @@ import java.util.Map;
 
 public class Context {
 
-    private static final ObjectMapper mapper = new ObjectMapper();
     private static final Logger logger = new Logger(Context.class);
+    private static final byte[] EMPTY_BYTES = new byte[0];
     static final int MAX_BODY_SIZE = 1024 * 1024; // 1 MB default
 
     private final String path;
     private final HttpServletRequest request;
-    private String responseBody = "";
+    private byte[] responseBodyBytes = EMPTY_BYTES;
     private String contentType = "text/plain; charset=utf-8";
     private int statusCode = 200;
     private final Map<String, String> headers = new HashMap<>();
     private Map<String, String> pathParams = Map.of();
+    private Map<String, Object> attributes = null;
     private String cachedBody = null;
     private boolean halted = false;
 
@@ -47,7 +47,7 @@ public class Context {
         try {
             int contentLength = request.getContentLength();
             if (contentLength > MAX_BODY_SIZE) {
-                throw new RuntimeException("Request body too large: " + contentLength + " bytes (max: " + MAX_BODY_SIZE + ")");
+                throw new ClientErrorException(413, "Request body too large: " + contentLength + " bytes (max: " + MAX_BODY_SIZE + ")");
             }
             Charset charset = request.getCharacterEncoding() != null
                     ? Charset.forName(request.getCharacterEncoding())
@@ -55,7 +55,7 @@ public class Context {
             // readNBytes caps reads at MAX_BODY_SIZE+1, preventing OOM on chunked transfers
             byte[] bytes = request.getInputStream().readNBytes(MAX_BODY_SIZE + 1);
             if (bytes.length > MAX_BODY_SIZE) {
-                throw new RuntimeException("Request body too large (max: " + MAX_BODY_SIZE + " bytes)");
+                throw new ClientErrorException(413, "Request body too large (max: " + MAX_BODY_SIZE + " bytes)");
             }
             cachedBody = new String(bytes, charset);
             return cachedBody;
@@ -69,7 +69,7 @@ public class Context {
         String raw = body();
         if (raw.isEmpty()) return null;
         try {
-            return mapper.readValue(raw, type);
+            return Json.MAPPER.readValue(raw, type);
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse request body as " + type.getSimpleName() + ": " + e.getMessage(), e);
         }
@@ -81,15 +81,36 @@ public class Context {
     public Context status(int code) { this.statusCode = code; return this; }
     public int statusCode() { return statusCode; }
 
-    public Context result(String body) { this.responseBody = body; return this; }
+    public Context result(String body) {
+        this.responseBodyBytes = body == null ? EMPTY_BYTES : body.getBytes(StandardCharsets.UTF_8);
+        return this;
+    }
 
     public Context json(Object object) {
         try {
-            this.responseBody = mapper.writeValueAsString(object);
+            this.responseBodyBytes = Json.MAPPER.writeValueAsBytes(object);
             this.contentType = "application/json; charset=utf-8";
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize response: " + e.getMessage(), e);
         }
+        return this;
+    }
+
+    /** Sets a pre-serialized JSON string as the response body. */
+    public Context jsonRaw(String json) {
+        this.responseBodyBytes = json == null ? EMPTY_BYTES : json.getBytes(StandardCharsets.UTF_8);
+        this.contentType = "application/json; charset=utf-8";
+        return this;
+    }
+
+    /**
+     * Sets pre-serialized UTF-8 JSON bytes as the response body. Most efficient
+     * when a cache layer keeps {@code writeValueAsBytes} results (or pre-gzipped
+     * variants) around. The array is kept as-is — callers must not mutate it.
+     */
+    public Context jsonBytes(byte[] json) {
+        this.responseBodyBytes = json == null ? EMPTY_BYTES : json;
+        this.contentType = "application/json; charset=utf-8";
         return this;
     }
 
@@ -102,7 +123,23 @@ public class Context {
         return this;
     }
 
-    public String responseBody() { return responseBody; }
+    /** Response body as a string (UTF-8). Prefer {@link #responseBodyBytes()} to avoid a copy. */
+    public String responseBody() { return new String(responseBodyBytes, StandardCharsets.UTF_8); }
+    public byte[] responseBodyBytes() { return responseBodyBytes; }
     public String contentType() { return contentType; }
     public Map<String, String> headers() { return Collections.unmodifiableMap(headers); }
+
+    /**
+     * Stores a per-request attribute. Used by auth middleware to pass verified
+     * identity (e.g. an email address) down to route handlers.
+     */
+    public void setAttribute(String key, Object value) {
+        if (attributes == null) attributes = new HashMap<>();
+        attributes.put(key, value);
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T> T getAttribute(String key) {
+        return attributes != null ? (T) attributes.get(key) : null;
+    }
 }
